@@ -50,9 +50,9 @@ npm start
 
 项目提供了 LaunchAgent 模板：
 
-- [start-alert-bot.sh](/Users/iris.y.ran/告警机器人/service/start-alert-bot.sh)：读取外部环境文件并启动 Node 服务；
-- [com.iris.kn-chat-alert-bot.plist.example](/Users/iris.y.ran/告警机器人/service/com.iris.kn-chat-alert-bot.plist.example)：登录自动启动和异常自动拉起配置；
-- [kn-chat-alert-bot.env.example](/Users/iris.y.ran/告警机器人/service/kn-chat-alert-bot.env.example)：Token 和群 ID 配置模板。
+- [start-alert-bot.sh](service/start-alert-bot.sh)：读取外部环境文件并启动 Node 服务；
+- [com.iris.kn-chat-alert-bot.plist.example](service/com.iris.kn-chat-alert-bot.plist.example)：登录自动启动和异常自动拉起配置；
+- [kn-chat-alert-bot.env.example](service/kn-chat-alert-bot.env.example)：Token 和群 ID 配置模板。
 
 先把配置文件放到项目目录之外，并限制权限：
 
