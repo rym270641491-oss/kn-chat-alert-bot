@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.iris.kn-chat-alert-bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/iris.y.ran/告警机器人/service/start-alert-bot.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/iris.y.ran/告警机器人</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/iris.y.ran/告警机器人/data/launchd.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/iris.y.ran/告警机器人/data/launchd.stderr.log</string>
+</dict>
+</plist>

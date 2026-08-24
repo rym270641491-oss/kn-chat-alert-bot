@@ -1,0 +1,19 @@
+{
+  "name": "kn-chat-start-bot-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KN Chat 双告警群日报分析机器人服务原型",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "demo": "node scripts/demo-report.js",
+    "demo:complex": "node scripts/demo-complex-report.js",
+    "report:local": "node scripts/local-report.js",
+    "preflight": "node scripts/preflight.js",
+    "check": "node --check bot.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
