@@ -6,7 +6,7 @@ const path = require('node:path')
 const {
   AlertStateStore,
   buildDailyReport,
-  getLatestReportCutoff,
+  getCurrentReportWindowIfDue,
   loadAlertState,
   parseAlertMessage
 } = require('./alert-report')
@@ -55,6 +55,15 @@ function readConfig(env = process.env) {
     reportMinute: integerEnv(env, 'REPORT_MINUTE', 0, { min: 0, max: 59 }),
     reportTopN: integerEnv(env, 'REPORT_TOP_N', 3, { min: 1, max: 100 }),
     reportTimeZone: String(env.REPORT_TIMEZONE || 'Asia/Shanghai'),
+    // 截止点仍是 19:00；缓冲只让发送稍晚，以等待 long polling 中的消息落盘。
+    reportGraceMinutes: integerEnv(env, 'REPORT_GRACE_MINUTES', 2, {
+      min: 0,
+      max: 60
+    }),
+    reportRetentionDays: integerEnv(env, 'REPORT_RETENTION_DAYS', 7, {
+      min: 1,
+      max: 90
+    }),
     reportCheckIntervalMs: integerEnv(env, 'REPORT_CHECK_INTERVAL_MS', 15000, {
       min: 1000
     })
@@ -158,7 +167,7 @@ function isStartCommand(message, botUsername) {
 
 function isTargetGroupMessage(message, targetChatId) {
   if (!message || !message.chat) return false
-  if (!['group', 'supergroup'].includes(message.chat.type)) return false
+  if (!['group', 'supergroup', 'channel'].includes(message.chat.type)) return false
   return String(message.chat.id) === String(targetChatId)
 }
 
@@ -173,6 +182,69 @@ function sourceForChat(message, config) {
   }
   if (chatId === String(config.applicationChatId)) return 'application'
   return null
+}
+
+function getUpdateMessage(update) {
+  const fields = ['message', 'channel_post', 'edited_message', 'edited_channel_post']
+  for (const field of fields) {
+    if (update && update[field] && typeof update[field] === 'object') {
+      return { message: update[field], updateType: field }
+    }
+  }
+  return { message: null, updateType: null }
+}
+
+function getMessageText(message) {
+  if (!message) return ''
+  if (typeof message.text === 'string') return message.text
+  if (typeof message.caption === 'string') return message.caption
+  return ''
+}
+
+function getMessageReceivedAt(message, fallback = new Date()) {
+  const date = message && message.date
+  const candidate =
+    typeof date === 'number'
+      ? new Date(date * 1000)
+      : typeof date === 'string'
+        ? new Date(date)
+        : new Date(fallback)
+
+  return Number.isNaN(candidate.getTime())
+    ? new Date(fallback).toISOString()
+    : candidate.toISOString()
+}
+
+function isAlertLikeText(text) {
+  return typeof text === 'string' && text.includes('告警')
+}
+
+function summarizeAlertText(text) {
+  const line = String(text)
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.includes('告警'))
+  return (line || '未解析告警消息').replace(/^#+\s*/, '').slice(0, 120)
+}
+
+function makeUnparsedAlertEvent({ source, sourceChatId, messageId, text, receivedAt }) {
+  const alertName = summarizeAlertText(text)
+  return {
+    eventId: `${sourceChatId}:${messageId}:unparsed`,
+    source,
+    sourceChatId: String(sourceChatId),
+    messageId,
+    status: 'unparsed',
+    alertName,
+    level: '',
+    labels: {},
+    job: '未解析',
+    fingerprint: JSON.stringify([String(sourceChatId), alertName, []]),
+    occurredAt: receivedAt,
+    occurredAtText: '',
+    receivedAt,
+    sequence: 0
+  }
 }
 
 async function loadOffset(filename) {
@@ -210,9 +282,21 @@ async function handleUpdate(
   update,
   { api, config, botUsername, logger, stateStore, now = new Date() }
 ) {
-  const message = update && update.message
+  const { message, updateType } = getUpdateMessage(update)
+  const updateId = update && update.update_id
+  if (!message) {
+    logger.info(`ignored update ${updateId ?? 'unknown'}: unsupported update payload`)
+    return false
+  }
+
   const source = sourceForChat(message, config)
-  if (!source) return false
+  if (!source) {
+    const chat = message.chat || {}
+    logger.info(
+      `ignored ${updateType} update ${updateId ?? 'unknown'}: chat ${chat.id ?? 'unknown'} type ${chat.type ?? 'unknown'} is not a configured source`
+    )
+    return false
+  }
 
   let handled = false
   if (isStartCommand(message, botUsername)) {
@@ -225,17 +309,38 @@ async function handleUpdate(
     handled = true
   }
 
-  const events = parseAlertMessage(message.text, {
+  const text = getMessageText(message)
+  const receivedAt = getMessageReceivedAt(message, now)
+  const events = parseAlertMessage(text, {
     source,
     sourceChatId: message.chat.id,
     messageId: message.message_id,
-    receivedAt: new Date(now).toISOString(),
+    receivedAt,
     timeZone: config.reportTimeZone
   })
   if (events.length > 0 && stateStore) {
     const added = await stateStore.addEvents(events)
-    logger.info(`stored ${added} alert event(s) from ${source} chat ${message.chat.id}`)
+    logger.info(
+      `stored ${added} alert event(s) from ${source} chat ${message.chat.id} via ${updateType}`
+    )
     handled = true
+  } else if (isAlertLikeText(text) && stateStore) {
+    const fallback = makeUnparsedAlertEvent({
+      source,
+      sourceChatId: message.chat.id,
+      messageId: message.message_id,
+      text,
+      receivedAt
+    })
+    const added = await stateStore.addEvents([fallback])
+    logger.info(
+      `stored ${added} unparsed alert event(s) from ${source} chat ${message.chat.id} via ${updateType}`
+    )
+    handled = true
+  } else if (!handled) {
+    logger.info(
+      `ignored ${updateType} update ${updateId ?? 'unknown'} from ${source} chat ${message.chat.id}: no alert block found`
+    )
   }
 
   return handled
@@ -287,19 +392,19 @@ async function runReportScheduler({ api, config, logger, stateStore, sleepImpl, 
   while (true) {
     try {
       const current = now()
-      const cutoff = getLatestReportCutoff(
+      const window = getCurrentReportWindowIfDue(
         current,
         config.reportHour,
         config.reportMinute,
-        config.reportTimeZone
+        config.reportTimeZone,
+        config.reportGraceMinutes
       )
-      const from = new Date(stateStore.state.lastReportAt)
 
-      if (from.getTime() < cutoff.getTime()) {
+      if (window && !stateStore.hasSentReport(window.to)) {
         const report = buildDailyReport({
           events: stateStore.state.events,
-          from,
-          to: cutoff,
+          from: window.from,
+          to: window.to,
           timeZone: config.reportTimeZone,
           topN: config.reportTopN
         })
@@ -307,9 +412,13 @@ async function runReportScheduler({ api, config, logger, stateStore, sleepImpl, 
           chat_id: config.reportChatId,
           text: report
         })
-        const removed = await stateStore.finalizeReport(cutoff)
+        await stateStore.markReportSent(window.to)
+        const removed = await stateStore.pruneOldEvents(
+          window.to,
+          config.reportRetentionDays
+        )
         logger.info(
-          `sent alert report for ${cutoff.toISOString()}, pruned ${removed} reported event(s)`
+          `sent alert report for ${window.to.toISOString()}, retained ${config.reportRetentionDays} day(s), pruned ${removed} expired event(s)`
         )
       }
     } catch (error) {
@@ -366,8 +475,11 @@ module.exports = {
   KnChatBotApi,
   consumeUpdates,
   handleUpdate,
+  getMessageReceivedAt,
+  getUpdateMessage,
   isStartCommand,
   isTargetGroupMessage,
+  makeUnparsedAlertEvent,
   loadAlertState,
   loadOffset,
   parseAlertMessage,

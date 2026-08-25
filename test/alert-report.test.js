@@ -10,7 +10,10 @@ const {
   AlertStateStore,
   aggregateSource,
   buildDailyReport,
+  getCurrentReportWindowIfDue,
   getLatestReportCutoff,
+  getLatestCompletedReportWindow,
+  getReportWindowForDate,
   parseAlertMessage
 } = require('../alert-report')
 
@@ -262,6 +265,40 @@ test('告警内容输出触发、恢复和未恢复数量', () => {
   assert.match(report, /sr查询超时队列告警（触发2次、恢复1次、未恢复1次）/)
 })
 
+test('日报展示恢复和未解析告警，避免只按触发显示为零', () => {
+  const recoveryOnly = parseAlertMessage(applicationRecoveryText('2026-08-21 16:07:00'), {
+    source: 'application',
+    sourceChatId: '-1002',
+    messageId: 12,
+    receivedAt: '2026-08-21T08:07:00.000Z'
+  })
+  const unparsed = {
+    eventId: '-1002:13:unparsed',
+    source: 'application',
+    sourceChatId: '-1002',
+    messageId: 13,
+    status: 'unparsed',
+    alertName: '格式变化的告警消息',
+    job: '未解析',
+    labels: {},
+    receivedAt: '2026-08-21T08:08:00.000Z',
+    occurredAt: '2026-08-21T08:08:00.000Z'
+  }
+
+  const report = buildDailyReport({
+    events: [...recoveryOnly, unparsed],
+    from: new Date('2026-08-20T11:00:00.000Z'),
+    to: new Date('2026-08-21T11:00:00.000Z'),
+    timeZone: 'Asia/Shanghai'
+  })
+
+  assert.match(report, /本时段事件：2条（触发0次、恢复1次、未解析1次）/)
+  assert.match(
+    report,
+    /二、应用组件告警\n📊 本时段事件：2条（触发0次、恢复1次、未解析1次）/
+  )
+})
+
 test('日报每个来源只展开告警最多的 Top 3 job', () => {
   const jobs = [
     ['job-a', 4],
@@ -297,30 +334,54 @@ test('日报每个来源只展开告警最多的 Top 3 job', () => {
   assert.match(report, /2\. job：job-b/)
   assert.match(report, /3\. job：job-c/)
   assert.doesNotMatch(report, /job：job-d/)
-  assert.match(report, /其余 1 个 job 未展开：job-d；合计1次告警，未恢复1次/)
+  assert.match(report, /其余 1 个 job 未展开：job-d；合计1条事件，未恢复1次/)
 })
 
-test('日报成功后只清理截止时间之前的事件', async () => {
+test('日报成功后保留可重算的窗口事件，只清理超出保留期的数据', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'kn-chat-alert-state-'))
   const filename = path.join(directory, 'alert-state.json')
   const state = {
     lastReportAt: '2026-08-20T11:00:00.000Z',
     events: [
-      { eventId: 'before', receivedAt: '2026-08-21T10:59:59.000Z' },
-      { eventId: 'at-cutoff', receivedAt: '2026-08-21T11:00:00.000Z' },
-      { eventId: 'after', receivedAt: '2026-08-21T11:00:01.000Z' }
+      { eventId: 'expired', occurredAt: '2026-08-13T10:59:59.000Z' },
+      { eventId: 'before', occurredAt: '2026-08-21T10:59:59.000Z' },
+      { eventId: 'at-cutoff', occurredAt: '2026-08-21T11:00:00.000Z' },
+      { eventId: 'after', occurredAt: '2026-08-21T11:00:01.000Z' }
     ]
   }
 
   try {
     const store = new AlertStateStore(filename, state)
-    const removed = await store.finalizeReport(new Date('2026-08-21T11:00:00.000Z'))
-    assert.equal(removed, 2)
+    await store.initialize()
+    const cutoff = new Date('2026-08-21T11:00:00.000Z')
+    const removed = await store.finalizeReport(cutoff, 7)
+    assert.equal(removed, 1)
     assert.equal(state.lastReportAt, '2026-08-21T11:00:00.000Z')
-    assert.deepEqual(state.events.map((event) => event.eventId), ['after'])
+    assert.equal(store.hasSentReport(cutoff), true)
+    assert.deepEqual(state.events.map((event) => event.eventId), [
+      'before',
+      'at-cutoff',
+      'after'
+    ])
   } finally {
     await fs.rm(directory, { recursive: true, force: true })
   }
+})
+
+test('固定日报窗口按告警正文发生时间归属，延迟拉取后仍可重算', () => {
+  const events = parseAlertMessage(applicationText('2026-08-25 18:39:53'), {
+    source: 'application',
+    sourceChatId: '-1002',
+    messageId: 42,
+    // 机器人在 19:05 才拉到这条 18:39 的消息。
+    receivedAt: '2026-08-25T11:05:00.000Z'
+  })
+  const window = getReportWindowForDate('2026-08-25', 19, 0, 'Asia/Shanghai')
+  const aggregate = aggregateSource(events, window.from, window.to, 'Asia/Shanghai')
+
+  assert.equal(aggregate.receivedTotal, 1)
+  assert.equal(aggregate.total, 1)
+  assert.equal(aggregate.groups[0].job, 'cn-starrocks-new')
 })
 
 test('日报包含两个来源块和时间范围', () => {
@@ -334,7 +395,7 @@ test('日报包含两个来源块和时间范围', () => {
   assert.match(report, /读取时段：2026-08-20 19:00 至 2026-08-21 19:00/)
   assert.match(report, /一、基础设施告警/)
   assert.match(report, /二、应用组件告警/)
-  assert.match(report, /暂无新增告警/) 
+  assert.match(report, /暂无接收的告警事件/)
 })
 
 test('按 Asia/Shanghai 计算最近一个 19:00 截止点', () => {
@@ -345,4 +406,40 @@ test('按 Asia/Shanghai 计算最近一个 19:00 截止点', () => {
     'Asia/Shanghai'
   )
   assert.equal(cutoff.toISOString(), '2026-08-21T11:00:00.000Z')
+})
+
+test('手动日报默认最近完整窗口，自动日报在缓冲期后才发送当日窗口', () => {
+  const beforeCutoff = getLatestCompletedReportWindow(
+    new Date('2026-08-25T10:59:59.000Z'),
+    19,
+    0,
+    'Asia/Shanghai'
+  )
+  const afterCutoff = getLatestCompletedReportWindow(
+    new Date('2026-08-25T11:00:00.000Z'),
+    19,
+    0,
+    'Asia/Shanghai'
+  )
+  const inGracePeriod = getCurrentReportWindowIfDue(
+    new Date('2026-08-25T11:01:59.000Z'),
+    19,
+    0,
+    'Asia/Shanghai',
+    2
+  )
+  const due = getCurrentReportWindowIfDue(
+    new Date('2026-08-25T11:02:00.000Z'),
+    19,
+    0,
+    'Asia/Shanghai',
+    2
+  )
+
+  assert.equal(beforeCutoff.reportDate, '2026-08-24')
+  assert.equal(afterCutoff.reportDate, '2026-08-25')
+  assert.equal(inGracePeriod, null)
+  assert.equal(due.reportDate, '2026-08-25')
+  assert.equal(due.from.toISOString(), '2026-08-24T11:00:00.000Z')
+  assert.equal(due.to.toISOString(), '2026-08-25T11:00:00.000Z')
 })

@@ -8,6 +8,7 @@
     "start": "node bot.js",
     "demo": "node scripts/demo-report.js",
     "demo:complex": "node scripts/demo-complex-report.js",
+    "report": "node scripts/local-report.js",
     "report:local": "node scripts/local-report.js",
     "preflight": "node scripts/preflight.js",
     "check": "node --check bot.js",

@@ -103,6 +103,66 @@ function getLatestReportCutoff(now, reportHour, reportMinute, timeZone) {
   return candidate
 }
 
+function getReportWindowForDate(
+  reportDate,
+  reportHour = 19,
+  reportMinute = 0,
+  timeZone = 'Asia/Shanghai'
+) {
+  const normalizedDate = String(reportDate || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+    throw new Error('reportDate must use YYYY-MM-DD')
+  }
+
+  const to = parseLocalTimestamp(
+    `${normalizedDate} ${String(reportHour).padStart(2, '0')}:${String(reportMinute).padStart(2, '0')}:00`,
+    timeZone
+  )
+  if (!to || Number.isNaN(to.getTime()) || formatDate(to, timeZone) !== normalizedDate) {
+    throw new Error(`invalid reportDate: ${normalizedDate}`)
+  }
+
+  const cutoffParts = getZonedParts(to, timeZone)
+  const from = shiftZonedDay(
+    { ...cutoffParts, hour: reportHour, minute: reportMinute },
+    -1,
+    timeZone
+  )
+  return { from, to, reportDate: normalizedDate }
+}
+
+function getLatestCompletedReportWindow(
+  now,
+  reportHour = 19,
+  reportMinute = 0,
+  timeZone = 'Asia/Shanghai'
+) {
+  const cutoff = getLatestReportCutoff(now, reportHour, reportMinute, timeZone)
+  return getReportWindowForDate(
+    formatDate(cutoff, timeZone),
+    reportHour,
+    reportMinute,
+    timeZone
+  )
+}
+
+function getCurrentReportWindowIfDue(
+  now,
+  reportHour = 19,
+  reportMinute = 0,
+  timeZone = 'Asia/Shanghai',
+  graceMinutes = 0
+) {
+  const window = getReportWindowForDate(
+    formatDate(now, timeZone),
+    reportHour,
+    reportMinute,
+    timeZone
+  )
+  const eligibleAt = window.to.getTime() + graceMinutes * 60 * 1000
+  return now.getTime() >= eligibleAt ? window : null
+}
+
 function cleanValue(value) {
   return String(value || '')
     .trim()
@@ -193,24 +253,34 @@ function parseAlertMessage(
   })
 }
 
-function eventReceivedAt(event) {
-  return new Date(event.receivedAt).getTime()
+function validTimestamp(value) {
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? null : timestamp
 }
 
+function eventReceivedAt(event) {
+  return validTimestamp(event.receivedAt)
+}
+
+// 报表按告警正文中的发生时间归属固定的 19:00–19:00 窗口。
+// 无法解析正文时间的消息才按机器人接收时间兜底，避免数据静默丢失。
 function eventTime(event) {
-  return new Date(event.occurredAt || event.receivedAt).getTime()
+  return validTimestamp(event.occurredAt) ?? eventReceivedAt(event)
 }
 
 function findRecoveredTriggerIds(events, cutoff) {
   const cutoffMs = cutoff.getTime()
   const ordered = events
-    .filter((event) => eventReceivedAt(event) <= cutoffMs)
+    .filter((event) => {
+      const timestamp = eventTime(event)
+      return timestamp !== null && timestamp <= cutoffMs
+    })
     .slice()
     .sort(
       (left, right) =>
-        eventReceivedAt(left) - eventReceivedAt(right) ||
+        eventTime(left) - eventTime(right) ||
         (left.sequence || 0) - (right.sequence || 0) ||
-        eventTime(left) - eventTime(right)
+        (eventReceivedAt(left) || 0) - (eventReceivedAt(right) || 0)
     )
 
   const active = new Map()
@@ -241,25 +311,36 @@ function aggregateSource(events, from, to, timeZone) {
   const fromMs = from.getTime()
   const toMs = to.getTime()
   const recovered = findRecoveredTriggerIds(events, to)
-  const triggers = events.filter(
-    (event) =>
-      event.status === 'trigger' &&
-      eventReceivedAt(event) > fromMs &&
-      eventReceivedAt(event) <= toMs
-  )
+  const windowEvents = events.filter((event) => {
+    const timestamp = eventTime(event)
+    return timestamp !== null && timestamp > fromMs && timestamp <= toMs
+  })
+  const triggers = windowEvents.filter((event) => event.status === 'trigger')
+  const recoveries = windowEvents.filter((event) => event.status === 'recovery')
+  const unparsed = windowEvents.filter((event) => event.status === 'unparsed')
   const groups = new Map()
 
-  for (const event of triggers) {
+  for (const event of windowEvents) {
     const group = groups.get(event.job) || {
       job: event.job,
       total: 0,
+      eventTotal: 0,
+      recoveries: 0,
+      unparsed: 0,
       unrecovered: 0,
       hours: new Map(),
       alertNames: new Map(),
       alertStats: new Map()
     }
-    group.total += 1
-    if (!recovered.has(event.eventId)) group.unrecovered += 1
+    group.eventTotal += 1
+    if (event.status === 'trigger') {
+      group.total += 1
+      if (!recovered.has(event.eventId)) group.unrecovered += 1
+    } else if (event.status === 'recovery') {
+      group.recoveries += 1
+    } else {
+      group.unparsed += 1
+    }
 
     const hour = hourBucket(event, timeZone)
     group.hours.set(hour, (group.hours.get(hour) || 0) + 1)
@@ -267,11 +348,17 @@ function aggregateSource(events, from, to, timeZone) {
     const alertStat = group.alertStats.get(event.alertName) || {
       triggered: 0,
       recovered: 0,
+      unparsed: 0,
       unrecovered: 0
     }
-    alertStat.triggered += 1
-    if (recovered.has(event.eventId)) alertStat.recovered += 1
-    else alertStat.unrecovered += 1
+    if (event.status === 'trigger') {
+      alertStat.triggered += 1
+      if (!recovered.has(event.eventId)) alertStat.unrecovered += 1
+    } else if (event.status === 'recovery') {
+      alertStat.recovered += 1
+    } else {
+      alertStat.unparsed += 1
+    }
     group.alertStats.set(event.alertName, alertStat)
     groups.set(event.job, group)
   }
@@ -289,9 +376,14 @@ function aggregateSource(events, from, to, timeZone) {
     return { ...group, hours, alertNames, alertStats }
   })
 
-  normalizedGroups.sort((left, right) => right.total - left.total || left.job.localeCompare(right.job))
+  normalizedGroups.sort(
+    (left, right) => right.eventTotal - left.eventTotal || left.job.localeCompare(right.job)
+  )
   return {
     total: triggers.length,
+    recoveryTotal: recoveries.length,
+    unparsedTotal: unparsed.length,
+    receivedTotal: windowEvents.length,
     unrecovered: triggers.filter((event) => !recovered.has(event.eventId)).length,
     groups: normalizedGroups
   }
@@ -304,7 +396,10 @@ function formatCountList(items, suffix = '次') {
 function formatAlertStats(items) {
   return items
     .map(([name, stat]) => {
-      return `${name || '未命名'}（触发${stat.triggered}次、恢复${stat.recovered}次、未恢复${stat.unrecovered}次）`
+      const parts = [`触发${stat.triggered}次`, `恢复${stat.recovered}次`]
+      if (stat.unparsed > 0) parts.push(`未解析${stat.unparsed}次`)
+      parts.push(`未恢复${stat.unrecovered}次`)
+      return `${name || '未命名'}（${parts.join('、')}）`
     })
     .join('、')
 }
@@ -313,11 +408,11 @@ function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
   const aggregate = aggregateSource(events, from, to, timeZone)
   const lines = [
     title,
-    `📊 本时段总数：${aggregate.total}次告警，未恢复${aggregate.unrecovered}次`
+    `📊 本时段事件：${aggregate.receivedTotal}条（触发${aggregate.total}次、恢复${aggregate.recoveryTotal}次、未解析${aggregate.unparsedTotal}次），未恢复${aggregate.unrecovered}次`
   ]
 
   if (aggregate.groups.length === 0) {
-    lines.push('暂无新增告警。')
+    lines.push('暂无接收的告警事件。')
     return lines.join('\n')
   }
 
@@ -330,7 +425,9 @@ function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
     const peak = group.hours[0]
     lines.push('')
     lines.push(`${index + 1}. job：${group.job}`)
-    lines.push(`   📊 总数：${group.total}次告警，未恢复${group.unrecovered}次`)
+    lines.push(
+      `   📊 共${group.eventTotal}条：触发${group.total}次、恢复${group.recoveries}次、未解析${group.unparsed}次，未恢复${group.unrecovered}次`
+    )
     lines.push('   🔍 统计分析：')
     lines.push(`   • 峰值时段：${peak[0]}（${peak[1]}次）`)
     lines.push(`   • 小时分布：${formatCountList(group.hours)}`)
@@ -341,7 +438,7 @@ function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
 
   const omittedGroups = aggregate.groups.slice(topN)
   if (omittedGroups.length > 0) {
-    const omittedTotal = omittedGroups.reduce((sum, group) => sum + group.total, 0)
+    const omittedTotal = omittedGroups.reduce((sum, group) => sum + group.eventTotal, 0)
     const omittedUnrecovered = omittedGroups.reduce(
       (sum, group) => sum + group.unrecovered,
       0
@@ -349,7 +446,7 @@ function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
     const omittedNames = omittedGroups.map((group) => group.job).join('、')
     lines.push('')
     lines.push(
-      `其余 ${omittedGroups.length} 个 job 未展开：${omittedNames}；合计${omittedTotal}次告警，未恢复${omittedUnrecovered}次`
+      `其余 ${omittedGroups.length} 个 job 未展开：${omittedNames}；合计${omittedTotal}条事件，未恢复${omittedUnrecovered}次`
     )
   }
 
@@ -373,18 +470,28 @@ async function loadAlertState(filename) {
   try {
     const content = await fs.readFile(filename, 'utf8')
     const saved = JSON.parse(content)
-    if (saved.lastReportAt && Number.isNaN(new Date(saved.lastReportAt).getTime())) {
+    if (saved.lastReportAt && validTimestamp(saved.lastReportAt) === null) {
       throw new Error(`invalid lastReportAt in ${filename}`)
     }
     if (!Array.isArray(saved.events)) {
       throw new Error(`invalid events in ${filename}`)
     }
+    if (
+      saved.sentReportCutoffs !== undefined &&
+      (!Array.isArray(saved.sentReportCutoffs) ||
+        saved.sentReportCutoffs.some((cutoff) => validTimestamp(cutoff) === null))
+    ) {
+      throw new Error(`invalid sentReportCutoffs in ${filename}`)
+    }
     return {
       lastReportAt: saved.lastReportAt || null,
+      sentReportCutoffs: saved.sentReportCutoffs || [],
       events: saved.events
     }
   } catch (error) {
-    if (error.code === 'ENOENT') return { lastReportAt: null, events: [] }
+    if (error.code === 'ENOENT') {
+      return { lastReportAt: null, sentReportCutoffs: [], events: [] }
+    }
     throw error
   }
 }
@@ -403,9 +510,17 @@ class AlertStateStore {
     this.writeChain = Promise.resolve()
   }
 
-  async initialize(now = new Date()) {
-    if (!this.state.lastReportAt) {
-      this.state.lastReportAt = now.toISOString()
+  async initialize() {
+    if (!Array.isArray(this.state.sentReportCutoffs)) {
+      this.state.sentReportCutoffs = []
+    }
+
+    // 兼容旧状态文件：旧版 lastReportAt 表示已经成功发送过的截止点。
+    if (
+      this.state.lastReportAt &&
+      !this.state.sentReportCutoffs.includes(this.state.lastReportAt)
+    ) {
+      this.state.sentReportCutoffs.push(this.state.lastReportAt)
       await this.save()
     }
   }
@@ -423,16 +538,47 @@ class AlertStateStore {
     return added
   }
 
-  async finalizeReport(cutoff) {
-    const cutoffMs = cutoff.getTime()
+  hasSentReport(cutoff) {
+    const cutoffValue = cutoff.toISOString()
+    return Array.isArray(this.state.sentReportCutoffs) &&
+      this.state.sentReportCutoffs.includes(cutoffValue)
+  }
+
+  async markReportSent(cutoff) {
+    const cutoffValue = cutoff.toISOString()
+    if (!Array.isArray(this.state.sentReportCutoffs)) {
+      this.state.sentReportCutoffs = []
+    }
+    if (this.hasSentReport(cutoff)) return false
+    this.state.sentReportCutoffs.push(cutoffValue)
+    // 保留这个字段，兼容已部署的旧状态文件；它不再作为下次日报的起点。
+    this.state.lastReportAt = cutoffValue
+    await this.save()
+    return true
+  }
+
+  async pruneOldEvents(referenceCutoff, retentionDays) {
+    if (!Number.isInteger(retentionDays) || retentionDays < 1) {
+      throw new Error('retentionDays must be an integer of at least 1')
+    }
+    const threshold = referenceCutoff.getTime() - retentionDays * 24 * 60 * 60 * 1000
     const before = this.state.events.length
     this.state.events = this.state.events.filter((event) => {
-      const receivedAt = eventReceivedAt(event)
-      return Number.isNaN(receivedAt) || receivedAt > cutoffMs
+      const timestamp = eventTime(event)
+      return timestamp === null || timestamp >= threshold
     })
-    this.state.lastReportAt = cutoff.toISOString()
+    this.state.sentReportCutoffs = this.state.sentReportCutoffs.filter((cutoff) => {
+      const timestamp = validTimestamp(cutoff)
+      return timestamp !== null && timestamp >= threshold
+    })
     await this.save()
     return before - this.state.events.length
+  }
+
+  // 兼容旧调用方：报告成功后标记已发送，但仅按保留期清理旧事件。
+  async finalizeReport(cutoff, retentionDays = 7) {
+    await this.markReportSent(cutoff)
+    return this.pruneOldEvents(cutoff, retentionDays)
   }
 
   async save() {
@@ -447,7 +593,10 @@ module.exports = {
   buildDailyReport,
   formatDate,
   formatDateTime,
+  getCurrentReportWindowIfDue,
   getLatestReportCutoff,
+  getLatestCompletedReportWindow,
+  getReportWindowForDate,
   loadAlertState,
   parseAlertMessage,
   parseLocalTimestamp,
