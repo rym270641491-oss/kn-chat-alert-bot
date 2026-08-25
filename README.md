@@ -195,6 +195,15 @@ cd /root/kn-chat-alert-bot
 
 该命令只会读取跳板机本地的环境文件，不会在工作流字段或日志中打印 Token、群 ID。为避免与常驻机器人同时写 JSON，工作流应在执行前停止服务，并在命令结束后重新启动服务。
 
+19:00 后想立即查看刚入库的告警时，可发送“当前统计日快报”。它展示从当天 19:00 到次日 19:00 的统计周期，但只统计截至命令执行时的数据，并明确标注数据截至时间；它不会标记正式日报已发送，也不会清理 JSON。因此，下一次 19:00 的完整自动日报不受影响：
+
+```bash
+cd /root/kn-chat-alert-bot
+/usr/local/bin/node scripts/send-report.js \
+  --env-file /etc/kn-chat-alert-bot.env \
+  --current
+```
+
 还没有群 ID 时，可以先只验证 Token 和 KN Chat API：
 
 ```bash

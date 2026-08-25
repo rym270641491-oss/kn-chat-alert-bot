@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const {
   AlertStateStore,
   buildDailyReport,
+  getCurrentReportingWindow,
   getLatestCompletedReportWindow,
   getReportWindowForDate,
   loadAlertState
@@ -47,7 +48,7 @@ function loadEnvironmentFile(filename, env) {
 }
 
 function readOptions(args) {
-  const options = { date: null, force: false, envFile: null }
+  const options = { current: false, date: null, force: false, envFile: null }
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]
     if (argument === '--date') {
@@ -60,6 +61,8 @@ function readOptions(args) {
       index += 1
     } else if (argument.startsWith('--env-file=')) {
       options.envFile = argument.slice('--env-file='.length)
+    } else if (argument === '--current') {
+      options.current = true
     } else if (argument === '--force') {
       options.force = true
     } else {
@@ -71,6 +74,9 @@ function readOptions(args) {
   }
   if (!options.envFile && args.includes('--env-file')) {
     throw new Error('--env-file requires a file path')
+  }
+  if (options.current && options.date) {
+    throw new Error('--current cannot be used with --date')
   }
   return options
 }
@@ -84,14 +90,17 @@ async function sendReport({ env = process.env, options = {}, now = new Date(), a
     max: 90
   })
   const stateFile = String(env.ALERT_STATE_FILE || './data/alert-state.json')
-  const window = options.date
-    ? getReportWindowForDate(options.date, reportHour, reportMinute, timeZone)
-    : getLatestCompletedReportWindow(now, reportHour, reportMinute, timeZone)
+  const isCurrentReport = options.current === true
+  const window = isCurrentReport
+    ? getCurrentReportingWindow(now, reportHour, reportMinute, timeZone)
+    : options.date
+      ? getReportWindowForDate(options.date, reportHour, reportMinute, timeZone)
+      : getLatestCompletedReportWindow(now, reportHour, reportMinute, timeZone)
   const state = await loadAlertState(stateFile)
   const stateStore = new AlertStateStore(stateFile, state)
   await stateStore.initialize()
 
-  if (stateStore.hasSentReport(window.to) && !options.force) {
+  if (!isCurrentReport && stateStore.hasSentReport(window.to) && !options.force) {
     return { status: 'already_sent', window, removed: 0 }
   }
 
@@ -99,6 +108,7 @@ async function sendReport({ env = process.env, options = {}, now = new Date(), a
     events: state.events,
     from: window.from,
     to: window.to,
+    asOf: isCurrentReport ? now : window.to,
     timeZone,
     topN: integerSetting(env, 'REPORT_TOP_N', 3, { min: 1, max: 100 })
   })
@@ -110,6 +120,10 @@ async function sendReport({ env = process.env, options = {}, now = new Date(), a
     chat_id: required(env.REPORT_CHAT_ID, 'REPORT_CHAT_ID'),
     text: report
   })
+
+  if (isCurrentReport) {
+    return { status: 'sent_current', window, asOf: new Date(now), removed: 0 }
+  }
 
   await stateStore.markReportSent(window.to)
   const removed = await stateStore.pruneOldEvents(window.to, retentionDays)
@@ -124,6 +138,12 @@ async function main() {
   const result = await sendReport({ options })
   if (result.status === 'already_sent') {
     console.log(`report_already_sent cutoff=${result.window.to.toISOString()}`)
+    return
+  }
+  if (result.status === 'sent_current') {
+    console.log(
+      `current_report_sent window_end=${result.window.to.toISOString()} data_as_of=${result.asOf.toISOString()}`
+    )
     return
   }
   console.log(

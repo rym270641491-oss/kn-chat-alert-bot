@@ -146,6 +146,28 @@ function getLatestCompletedReportWindow(
   )
 }
 
+// 当前统计日仍以 19:00 为边界，但其结束时间是下一天的 19:00。
+// 手动快报使用 asOf 作为数据截止点，避免把未来尚未发生的数据误认为零。
+function getCurrentReportingWindow(
+  now,
+  reportHour = 19,
+  reportMinute = 0,
+  timeZone = 'Asia/Shanghai'
+) {
+  const from = getLatestReportCutoff(now, reportHour, reportMinute, timeZone)
+  const fromParts = getZonedParts(from, timeZone)
+  const to = shiftZonedDay(
+    { ...fromParts, hour: reportHour, minute: reportMinute },
+    1,
+    timeZone
+  )
+  return {
+    from,
+    to,
+    reportDate: formatDate(to, timeZone)
+  }
+}
+
 function getCurrentReportWindowIfDue(
   now,
   reportHour = 19,
@@ -453,17 +475,35 @@ function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
   return lines.join('\n')
 }
 
-function buildDailyReport({ events, from, to, timeZone = 'Asia/Shanghai', topN = 3 }) {
+function buildDailyReport({
+  events,
+  from,
+  to,
+  asOf = to,
+  timeZone = 'Asia/Shanghai',
+  topN = 3
+}) {
+  const dataTo = new Date(asOf)
+  if (Number.isNaN(dataTo.getTime()) || dataTo < from || dataTo > to) {
+    throw new Error('report asOf must be within the report window')
+  }
+  const isCurrentPeriodSnapshot = dataTo.getTime() < to.getTime()
   const infrastructureEvents = events.filter((event) => event.source === 'infrastructure')
   const applicationEvents = events.filter((event) => event.source === 'application')
-  return [
+  const lines = [
     '【告警分析汇报】',
     `读取时段：${formatDateTime(from, timeZone)} 至 ${formatDateTime(to, timeZone)}`,
+  ]
+  if (isCurrentPeriodSnapshot) {
+    lines.push(`数据截至：${formatDateTime(dataTo, timeZone)}（当前统计日快报，非完整日报）`)
+  }
+  lines.push(
     '',
-    renderSourceSection('一、基础设施告警', infrastructureEvents, from, to, timeZone, topN),
+    renderSourceSection('一、基础设施告警', infrastructureEvents, from, dataTo, timeZone, topN),
     '',
-    renderSourceSection('二、应用组件告警', applicationEvents, from, to, timeZone, topN)
-  ].join('\n')
+    renderSourceSection('二、应用组件告警', applicationEvents, from, dataTo, timeZone, topN)
+  )
+  return lines.join('\n')
 }
 
 async function loadAlertState(filename) {
@@ -594,6 +634,7 @@ module.exports = {
   formatDate,
   formatDateTime,
   getCurrentReportWindowIfDue,
+  getCurrentReportingWindow,
   getLatestReportCutoff,
   getLatestCompletedReportWindow,
   getReportWindowForDate,

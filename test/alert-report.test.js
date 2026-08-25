@@ -11,6 +11,7 @@ const {
   aggregateSource,
   buildDailyReport,
   getCurrentReportWindowIfDue,
+  getCurrentReportingWindow,
   getLatestReportCutoff,
   getLatestCompletedReportWindow,
   getReportWindowForDate,
@@ -442,4 +443,32 @@ test('手动日报默认最近完整窗口，自动日报在缓冲期后才发�
   assert.equal(due.reportDate, '2026-08-25')
   assert.equal(due.from.toISOString(), '2026-08-24T11:00:00.000Z')
   assert.equal(due.to.toISOString(), '2026-08-25T11:00:00.000Z')
+})
+
+test('当前统计日快报在 19:00 后展示次日截止点，但只统计截至执行时的数据', () => {
+  const window = getCurrentReportingWindow(
+    new Date('2026-08-25T12:15:00.000Z'),
+    19,
+    0,
+    'Asia/Shanghai'
+  )
+  const events = parseAlertMessage(applicationText('2026-08-25 20:11:53'), {
+    source: 'application',
+    sourceChatId: '-1002',
+    messageId: 99,
+    receivedAt: '2026-08-25T12:11:53.000Z'
+  })
+  const report = buildDailyReport({
+    events,
+    from: window.from,
+    to: window.to,
+    asOf: new Date('2026-08-25T12:15:00.000Z'),
+    timeZone: 'Asia/Shanghai'
+  })
+
+  assert.equal(window.from.toISOString(), '2026-08-25T11:00:00.000Z')
+  assert.equal(window.to.toISOString(), '2026-08-26T11:00:00.000Z')
+  assert.match(report, /读取时段：2026-08-25 19:00 至 2026-08-26 19:00/)
+  assert.match(report, /数据截至：2026-08-25 20:15（当前统计日快报，非完整日报）/)
+  assert.match(report, /sr查询超时队列告警/)
 })
