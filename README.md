@@ -183,6 +183,18 @@ REPORT_TIMEZONE=Asia/Shanghai \
 
 机器人必须先运行并成功接收告警，状态文件中才会有可统计的事件；KN Chat 不提供群历史消息回放。
 
+工作流需要手动补发到汇报群时，使用一次性发送脚本。它默认拒绝重复发送同一截止日期；`--force` 仅用于人工确认要补发时：
+
+```bash
+cd /root/kn-chat-alert-bot
+/usr/local/bin/node scripts/send-report.js \
+  --env-file /etc/kn-chat-alert-bot.env \
+  --date 2026-08-25 \
+  --force
+```
+
+该命令只会读取跳板机本地的环境文件，不会在工作流字段或日志中打印 Token、群 ID。为避免与常驻机器人同时写 JSON，工作流应在执行前停止服务，并在命令结束后重新启动服务。
+
 还没有群 ID 时，可以先只验证 Token 和 KN Chat API：
 
 ```bash

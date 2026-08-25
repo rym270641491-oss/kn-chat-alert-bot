@@ -10,6 +10,7 @@
     "demo:complex": "node scripts/demo-complex-report.js",
     "report": "node scripts/local-report.js",
     "report:local": "node scripts/local-report.js",
+    "report:send": "node scripts/send-report.js",
     "preflight": "node scripts/preflight.js",
     "check": "node --check bot.js",
     "test": "node --test"
