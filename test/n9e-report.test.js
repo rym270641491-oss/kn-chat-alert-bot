@@ -90,8 +90,10 @@ test('日报直接使用两个业务组的历史告警，不依赖群消息或�
   assert.deepEqual(calls.map((call) => call.businessGroupId).sort(), [10, 12])
   assert.equal(result.sourceCounts.infrastructure, 1)
   assert.equal(result.sourceCounts.application, 1)
-  assert.match(report, /磁盘存储利用率80%（触发1次、恢复1次、未恢复0次）/)
-  assert.match(report, /sr查询超时队列告警（触发1次、恢复0次、未恢复1次）/)
+  assert.match(report, /1\. 磁盘存储利用率80%/)
+  assert.match(report, /1\. sr查询超时队列告警/)
+  assert.match(report, /• 告警触发：1次/)
+  assert.match(report, /• 尚未恢复：1次/)
   assert.match(report, /当前统计日快报/)
 })
 

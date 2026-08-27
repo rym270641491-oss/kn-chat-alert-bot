@@ -263,7 +263,10 @@ test('告警内容输出触发、恢复和未恢复数量', () => {
     timeZone: 'Asia/Shanghai'
   })
 
-  assert.match(report, /sr查询超时队列告警（触发2次、恢复1次、未恢复1次）/)
+  assert.match(report, /1\. sr查询超时队列告警/)
+  assert.match(report, /• 告警触发：2次/)
+  assert.match(report, /• 告警恢复：1次/)
+  assert.match(report, /• 尚未恢复：1次/)
 })
 
 test('日报展示恢复和未解析告警，避免只按触发显示为零', () => {
@@ -293,14 +296,14 @@ test('日报展示恢复和未解析告警，避免只按触发显示为零', ()
     timeZone: 'Asia/Shanghai'
   })
 
-  assert.match(report, /本时段事件：2条（触发0次、恢复1次、未解析1次）/)
+  assert.match(report, /本时段事件：2条\n   • 告警触发：0次\n   • 告警恢复：1次\n   • 未解析：1次/)
   assert.match(
     report,
-    /二、应用组件告警\n📊 本时段事件：2条（触发0次、恢复1次、未解析1次）/
+    /二、应用组件告警\n📊 本时段事件：2条\n   • 告警触发：0次\n   • 告警恢复：1次\n   • 未解析：1次/
   )
 })
 
-test('日报每个来源只展开告警最多的 Top 3 job', () => {
+test('日报按告警内容完整展开并列出所有 job', () => {
   const jobs = [
     ['job-a', 4],
     ['job-b', 3],
@@ -331,11 +334,11 @@ test('日报每个来源只展开告警最多的 Top 3 job', () => {
     topN: 3
   })
 
-  assert.match(report, /1\. job：job-a/)
-  assert.match(report, /2\. job：job-b/)
-  assert.match(report, /3\. job：job-c/)
-  assert.doesNotMatch(report, /job：job-d/)
-  assert.match(report, /其余 1 个 job 未展开：job-d；合计1条事件，未恢复1次/)
+  assert.match(report, /📋 按告警内容明细（全部展开）：/)
+  assert.match(report, /1\. sr查询超时队列告警/)
+  assert.match(report, /涉及 job：job-a \(4次\)、job-b \(3次\)、job-c \(2次\)、job-d \(1次\)/)
+  assert.doesNotMatch(report, /Top 3/)
+  assert.doesNotMatch(report, /未展开/)
 })
 
 test('日报成功后保留可重算的窗口事件，只清理超出保留期的数据', async () => {

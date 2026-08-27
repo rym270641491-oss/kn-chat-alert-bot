@@ -341,6 +341,8 @@ function aggregateSource(events, from, to, timeZone) {
   const recoveries = windowEvents.filter((event) => event.status === 'recovery')
   const unparsed = windowEvents.filter((event) => event.status === 'unparsed')
   const groups = new Map()
+  const hours = new Map()
+  const alertStats = new Map()
 
   for (const event of windowEvents) {
     const group = groups.get(event.job) || {
@@ -365,6 +367,7 @@ function aggregateSource(events, from, to, timeZone) {
     }
 
     const hour = hourBucket(event, timeZone)
+    hours.set(hour, (hours.get(hour) || 0) + 1)
     group.hours.set(hour, (group.hours.get(hour) || 0) + 1)
     group.alertNames.set(event.alertName, (group.alertNames.get(event.alertName) || 0) + 1)
     const alertStat = group.alertStats.get(event.alertName) || {
@@ -383,6 +386,34 @@ function aggregateSource(events, from, to, timeZone) {
     }
     group.alertStats.set(event.alertName, alertStat)
     groups.set(event.job, group)
+
+    const sourceAlertStat = alertStats.get(event.alertName) || {
+      eventTotal: 0,
+      triggered: 0,
+      recovered: 0,
+      unparsed: 0,
+      unrecovered: 0,
+      hours: new Map(),
+      jobs: new Map()
+    }
+    sourceAlertStat.eventTotal += 1
+    sourceAlertStat.hours.set(
+      hour,
+      (sourceAlertStat.hours.get(hour) || 0) + 1
+    )
+    sourceAlertStat.jobs.set(
+      event.job,
+      (sourceAlertStat.jobs.get(event.job) || 0) + 1
+    )
+    if (event.status === 'trigger') {
+      sourceAlertStat.triggered += 1
+      if (!recovered.has(event.eventId)) sourceAlertStat.unrecovered += 1
+    } else if (event.status === 'recovery') {
+      sourceAlertStat.recovered += 1
+    } else {
+      sourceAlertStat.unparsed += 1
+    }
+    alertStats.set(event.alertName, sourceAlertStat)
   }
 
   const normalizedGroups = [...groups.values()].map((group) => {
@@ -401,12 +432,36 @@ function aggregateSource(events, from, to, timeZone) {
   normalizedGroups.sort(
     (left, right) => right.eventTotal - left.eventTotal || left.job.localeCompare(right.job)
   )
+
+  const normalizedHours = [...hours.entries()].sort((left, right) => {
+    return right[1] - left[1] || left[0].localeCompare(right[0])
+  })
+  const normalizedAlertStats = [...alertStats.entries()]
+    .map(([name, stat]) => ({
+      name,
+      ...stat,
+      hours: [...stat.hours.entries()].sort((left, right) => {
+        return right[1] - left[1] || left[0].localeCompare(right[0])
+      }),
+      jobs: [...stat.jobs.entries()].sort((left, right) => {
+        return right[1] - left[1] || left[0].localeCompare(right[0])
+      })
+    }))
+    .sort(
+      (left, right) =>
+        right.unrecovered - left.unrecovered ||
+        right.eventTotal - left.eventTotal ||
+        left.name.localeCompare(right.name)
+    )
+
   return {
     total: triggers.length,
     recoveryTotal: recoveries.length,
     unparsedTotal: unparsed.length,
     receivedTotal: windowEvents.length,
     unrecovered: triggers.filter((event) => !recovered.has(event.eventId)).length,
+    hours: normalizedHours,
+    alertStats: normalizedAlertStats,
     groups: normalizedGroups
   }
 }
@@ -426,11 +481,15 @@ function formatAlertStats(items) {
     .join('、')
 }
 
-function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
+function renderSourceSection(title, events, from, to, timeZone) {
   const aggregate = aggregateSource(events, from, to, timeZone)
   const lines = [
     title,
-    `📊 本时段事件：${aggregate.receivedTotal}条（触发${aggregate.total}次、恢复${aggregate.recoveryTotal}次、未解析${aggregate.unparsedTotal}次），未恢复${aggregate.unrecovered}次`
+    `📊 本时段事件：${aggregate.receivedTotal}条`,
+    `   • 告警触发：${aggregate.total}次`,
+    `   • 告警恢复：${aggregate.recoveryTotal}次`,
+    `   • 未解析：${aggregate.unparsedTotal}次`,
+    `   • 尚未恢复：${aggregate.unrecovered}次`
   ]
 
   if (aggregate.groups.length === 0) {
@@ -438,38 +497,51 @@ function renderSourceSection(title, events, from, to, timeZone, topN = 3) {
     return lines.join('\n')
   }
 
-  const visibleGroups = aggregate.groups.slice(0, topN)
-  if (aggregate.groups.length > topN) {
-    lines.push(`📌 以下展开告警次数最多的 Top ${topN} 个 job：`)
+  const focus = []
+  if (aggregate.unrecovered > 0) {
+    const unrecovered = aggregate.alertStats
+      .filter((stat) => stat.unrecovered > 0)
+      .map((stat) => `${stat.name || '未命名'} ${stat.unrecovered}次`)
+      .join('、')
+    focus.push(`⚠️ 未恢复重点：${unrecovered}`)
+  }
+  if (aggregate.hours.length > 0) {
+    const peak = aggregate.hours[0]
+    focus.push(`🔥 全部告警峰值：${peak[0]}（${peak[1]}次）`)
+  }
+  if (focus.length > 0) {
+    lines.push('')
+    lines.push('📌 重点关注：')
+    focus.forEach((item) => lines.push(`   • ${item}`))
   }
 
-  visibleGroups.forEach((group, index) => {
-    const peak = group.hours[0]
+  lines.push('', '📋 按告警内容明细（全部展开）：')
+  aggregate.alertStats.forEach((stat, index) => {
+    const peak = stat.hours[0]
     lines.push('')
-    lines.push(`${index + 1}. job：${group.job}`)
-    lines.push(
-      `   📊 共${group.eventTotal}条：触发${group.total}次、恢复${group.recoveries}次、未解析${group.unparsed}次，未恢复${group.unrecovered}次`
-    )
-    lines.push('   🔍 统计分析：')
-    lines.push(`   • 峰值时段：${peak[0]}（${peak[1]}次）`)
-    lines.push(`   • 小时分布：${formatCountList(group.hours)}`)
-    lines.push(
-      `   • 告警内容：${group.alertStats.length ? formatAlertStats(group.alertStats) : '无'}`
-    )
+    lines.push(`${index + 1}. ${stat.name || '未命名告警'}`)
+    lines.push(`   📊 事件总数：${stat.eventTotal}条`)
+    lines.push(`   • 告警触发：${stat.triggered}次`)
+    lines.push(`   • 告警恢复：${stat.recovered}次`)
+    lines.push(`   • 未解析：${stat.unparsed}次`)
+    lines.push(`   • 尚未恢复：${stat.unrecovered}次`)
+    if (peak) lines.push(`   • 峰值时段：${peak[0]}（${peak[1]}次）`)
+    lines.push(`   • 小时分布：${formatCountList(stat.hours)}`)
+    lines.push(`   • 涉及 job：${formatCountList(stat.jobs)}`)
   })
 
-  const omittedGroups = aggregate.groups.slice(topN)
-  if (omittedGroups.length > 0) {
-    const omittedTotal = omittedGroups.reduce((sum, group) => sum + group.eventTotal, 0)
-    const omittedUnrecovered = omittedGroups.reduce(
-      (sum, group) => sum + group.unrecovered,
-      0
-    )
-    const omittedNames = omittedGroups.map((group) => group.job).join('、')
-    lines.push('')
-    lines.push(
-      `其余 ${omittedGroups.length} 个 job 未展开：${omittedNames}；合计${omittedTotal}条事件，未恢复${omittedUnrecovered}次`
-    )
+  lines.push('', '🔔 恢复状态汇总：')
+  lines.push(`   ✅ 已恢复：${aggregate.recoveryTotal}次`)
+  if (aggregate.unrecovered > 0) {
+    lines.push(`   ⚠️ 尚未恢复：${aggregate.unrecovered}次`)
+    aggregate.alertStats
+      .filter((stat) => stat.unrecovered > 0)
+      .forEach((stat) => lines.push(`      • ${stat.name || '未命名告警'}：${stat.unrecovered}次`))
+  } else {
+    lines.push('   ✅ 当前窗口内没有尚未恢复的告警')
+  }
+  if (aggregate.unparsedTotal > 0) {
+    lines.push(`   📝 未解析：${aggregate.unparsedTotal}次`)
   }
 
   return lines.join('\n')
@@ -480,8 +552,7 @@ function buildDailyReport({
   from,
   to,
   asOf = to,
-  timeZone = 'Asia/Shanghai',
-  topN = 3
+  timeZone = 'Asia/Shanghai'
 }) {
   const dataTo = new Date(asOf)
   if (Number.isNaN(dataTo.getTime()) || dataTo < from || dataTo > to) {
@@ -499,9 +570,9 @@ function buildDailyReport({
   }
   lines.push(
     '',
-    renderSourceSection('一、基础设施告警', infrastructureEvents, from, dataTo, timeZone, topN),
+    renderSourceSection('一、基础设施告警', infrastructureEvents, from, dataTo, timeZone),
     '',
-    renderSourceSection('二、应用组件告警', applicationEvents, from, dataTo, timeZone, topN)
+    renderSourceSection('二、应用组件告警', applicationEvents, from, dataTo, timeZone)
   )
   return lines.join('\n')
 }
