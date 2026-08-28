@@ -49,7 +49,7 @@ test('Nightingale 历史事件转换为触发/恢复，按平台事件 ID 去重
   assert.equal(events[0].eventId, 'infrastructure:101:trigger')
 })
 
-test('日报直接使用两个业务组的历史告警，不依赖群消息或本地告警 JSON', async () => {
+test('日报直接使用三个业务组的历史告警，不依赖群消息或本地告警 JSON', async () => {
   const calls = []
   const client = {
     async listHistoryAlerts(input) {
@@ -66,12 +66,24 @@ test('日报直接使用两个业务组的历史告警，不依赖群消息或�
           tags_map: { group: 'fe', job: 'cn-starrocks-new' }
         })]
       }
+      if (input.businessGroupId === 20) {
+        return [historyEvent({
+          id: 301,
+          hash: 'event-hash-301',
+          group_id: 20,
+          rule_name: '巴铁flink_checkpoint大于6分钟',
+          is_recovered: 1,
+          recover_time: timestamp('2026-08-25T12:13:53.000Z'),
+          tags_map: { job: '巴铁实时任务' }
+        })]
+      }
       throw new Error('unexpected business group')
     }
   }
   const config = {
     infrastructureGroupId: 12,
     applicationGroupId: 10,
+    realtimeTaskGroupId: 20,
     pageSize: 100,
     maxPages: 10
   }
@@ -87,11 +99,14 @@ test('日报直接使用两个业务组的历史告警，不依赖群消息或�
     topN: 3
   })
 
-  assert.deepEqual(calls.map((call) => call.businessGroupId).sort(), [10, 12])
+  assert.deepEqual(calls.map((call) => call.businessGroupId).sort(), [10, 12, 20])
   assert.equal(result.sourceCounts.infrastructure, 1)
   assert.equal(result.sourceCounts.application, 1)
+  assert.equal(result.sourceCounts['realtime-task'], 1)
   assert.match(report, /1\. 磁盘存储利用率80%/)
   assert.match(report, /1\. sr查询超时队列告警/)
+  assert.match(report, /三、安全生产-实时任务告警/)
+  assert.match(report, /巴铁flink_checkpoint大于6分钟/)
   assert.match(report, /• 告警触发：1次/)
   assert.match(report, /• 尚未恢复：1次/)
   assert.match(report, /当前统计日快报/)
@@ -107,6 +122,7 @@ test('当前统计日手动快报查询到执行时刻并可以重复发送', as
     N9E_TOKEN: 'n9e-test-token',
     N9E_INFRASTRUCTURE_GROUP_ID: '12',
     N9E_APPLICATION_GROUP_ID: '10',
+    N9E_REALTIME_TASK_GROUP_ID: '20',
     N9E_REPORT_STATE_FILE: reportState,
     BOT_TOKEN: 'kn-chat-test-token',
     REPORT_CHAT_ID: '-1003',

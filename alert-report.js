@@ -552,15 +552,17 @@ function buildDailyReport({
   from,
   to,
   asOf = to,
-  timeZone = 'Asia/Shanghai'
+  timeZone = 'Asia/Shanghai',
+  sourceSections = [
+    { source: 'infrastructure', title: '基础设施告警' },
+    { source: 'application', title: '应用组件告警' }
+  ]
 }) {
   const dataTo = new Date(asOf)
   if (Number.isNaN(dataTo.getTime()) || dataTo < from || dataTo > to) {
     throw new Error('report asOf must be within the report window')
   }
   const isCurrentPeriodSnapshot = dataTo.getTime() < to.getTime()
-  const infrastructureEvents = events.filter((event) => event.source === 'infrastructure')
-  const applicationEvents = events.filter((event) => event.source === 'application')
   const lines = [
     '【告警分析汇报】',
     `读取时段：${formatDateTime(from, timeZone)} 至 ${formatDateTime(to, timeZone)}`,
@@ -568,12 +570,14 @@ function buildDailyReport({
   if (isCurrentPeriodSnapshot) {
     lines.push(`数据截至：${formatDateTime(dataTo, timeZone)}（当前统计日快报，非完整日报）`)
   }
-  lines.push(
-    '',
-    renderSourceSection('一、基础设施告警', infrastructureEvents, from, dataTo, timeZone),
-    '',
-    renderSourceSection('二、应用组件告警', applicationEvents, from, dataTo, timeZone)
-  )
+  const ordinals = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+  const sections = sourceSections.map((section, index) => {
+    const sourceEvents = events.filter((event) => event.source === section.source)
+    const ordinal = ordinals[index] || String(index + 1)
+    const title = `${ordinal}、${section.title}`
+    return renderSourceSection(title, sourceEvents, from, dataTo, timeZone)
+  })
+  lines.push('', sections.join('\n\n'))
   return lines.join('\n')
 }
 

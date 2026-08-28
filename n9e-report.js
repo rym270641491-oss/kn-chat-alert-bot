@@ -3,8 +3,24 @@
 const { buildDailyReport, formatDateTime } = require('./alert-report')
 
 const GROUPS = Object.freeze([
-  { source: 'infrastructure', title: '基础设施', configName: 'N9E_INFRASTRUCTURE_GROUP_ID' },
-  { source: 'application', title: '应用组件', configName: 'N9E_APPLICATION_GROUP_ID' }
+  {
+    source: 'infrastructure',
+    title: '基础设施告警',
+    configName: 'N9E_INFRASTRUCTURE_GROUP_ID',
+    configKey: 'infrastructureGroupId'
+  },
+  {
+    source: 'application',
+    title: '应用组件告警',
+    configName: 'N9E_APPLICATION_GROUP_ID',
+    configKey: 'applicationGroupId'
+  },
+  {
+    source: 'realtime-task',
+    title: '安全生产-实时任务告警',
+    configName: 'N9E_REALTIME_TASK_GROUP_ID',
+    configKey: 'realtimeTaskGroupId'
+  }
 ])
 
 function required(value, name) {
@@ -33,14 +49,17 @@ function readN9eReportConfig(env = process.env) {
       min: 1,
       max: Number.MAX_SAFE_INTEGER
     }),
+    realtimeTaskGroupId: integerSetting(env, 'N9E_REALTIME_TASK_GROUP_ID', null, {
+      min: 1,
+      max: Number.MAX_SAFE_INTEGER
+    }),
     requestTimeoutMs: integerSetting(env, 'N9E_REQUEST_TIMEOUT_MS', 15_000, {
       min: 1_000,
       max: 120_000
     }),
     pageSize: integerSetting(env, 'N9E_PAGE_SIZE', 100, { min: 1, max: 1_000 }),
     maxPages: integerSetting(env, 'N9E_MAX_PAGES', 100, { min: 1, max: 10_000 }),
-    timeZone: String(env.REPORT_TIMEZONE || 'Asia/Shanghai'),
-    reportTopN: integerSetting(env, 'REPORT_TOP_N', 3, { min: 1, max: 100 })
+    timeZone: String(env.REPORT_TIMEZONE || 'Asia/Shanghai')
   }
 }
 
@@ -162,9 +181,7 @@ function normalizeHistoryEvents(events, { source, groupId }) {
 
 async function fetchN9eReportEvents({ client, from, to, config }) {
   const requests = GROUPS.map(async (group) => {
-    const groupId = group.source === 'infrastructure'
-      ? config.infrastructureGroupId
-      : config.applicationGroupId
+    const groupId = config[group.configKey]
     const records = await client.listHistoryAlerts({
       from,
       to,
@@ -188,8 +205,15 @@ async function fetchN9eReportEvents({ client, from, to, config }) {
   }
 }
 
-function buildN9eDailyReport({ events, from, to, asOf = to, timeZone, topN }) {
-  return buildDailyReport({ events, from, to, asOf, timeZone, topN })
+function buildN9eDailyReport({ events, from, to, asOf = to, timeZone }) {
+  return buildDailyReport({
+    events,
+    from,
+    to,
+    asOf,
+    timeZone,
+    sourceSections: GROUPS.map(({ source, title }) => ({ source, title }))
+  })
 }
 
 function describeWindow({ from, to, timeZone }) {

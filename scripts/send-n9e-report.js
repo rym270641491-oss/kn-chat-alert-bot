@@ -103,8 +103,7 @@ async function sendN9eReport({
     from: window.from,
     to: window.to,
     asOf: dataTo,
-    timeZone: config.timeZone,
-    topN: config.reportTopN
+    timeZone: config.timeZone
   })
 
   const sender = chatApi || new KnChatBotApi({
